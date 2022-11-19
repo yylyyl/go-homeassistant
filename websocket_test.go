@@ -283,7 +283,7 @@ func TestWebsocketClient_SubscribeEventsStateChanged(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	ch, err := ha.SubscribeEventsStateChanged(ctx)
+	ch, id, err := ha.SubscribeToChangedStates(ctx)
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestWebsocketClient_SubscribeEventsStateChanged(t *testing.T) {
 		t.Fatalf("unexpected response: %v", s)
 	}
 
-	err = ha.UnsubscribeEventsStateChanged(ctx)
+	err = ha.UnsubscribeToEvents(ctx, id)
 	if err != nil {
 		t.Fatalf("failed to unsubscribe: %v", err)
 	}
@@ -332,5 +332,89 @@ func TestWebsocketClient_CallService(t *testing.T) {
 	}, "light.kitchen")
 	if err != nil {
 		t.Fatalf("failed to call service: %v", err)
+	}
+}
+
+func TestWebsocketClient_SubscribeToTrigger(t *testing.T) {
+	ts := &testWs{
+		// subscribe
+		TestFunc1: func(m map[string]any) (interface{}, error) {
+			return map[string]any{
+				"id":      m["id"],
+				"type":    "result",
+				"success": true,
+				"result":  nil,
+			}, nil
+		},
+		// event
+		TestFunc2: func(m map[string]any) interface{} {
+			return map[string]any{
+				"id":   m["id"],
+				"type": "event",
+				"event": map[string]any{
+					"variables": map[string]any{
+						"trigger": map[string]any{
+							"platform":  "state",
+							"entity_id": "light.one",
+							"to_state": map[string]any{
+								"entity_id": "light.one",
+								"state":     "on",
+							},
+							"from_state": map[string]any{
+								"entity_id": "light.one",
+								"state":     "off",
+							},
+						},
+					},
+				},
+			}
+		},
+		// unsubscribe
+		TestRead3: true,
+		TestFunc3: func(m map[string]any) interface{} {
+			return map[string]any{
+				"id":      m["id"],
+				"type":    "result",
+				"success": true,
+				"result":  nil,
+			}
+		},
+	}
+	ts.Run()
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+	defer cancel()
+
+	ha, err := DialWebsocket(ctx, &WebsocketConfig{
+		Url:           ts.URL,
+		Authorization: "",
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	trigger := NewStateTriggerConfig()
+	trigger.EntityId("light.one")
+	trigger.To("on")
+
+	ch, id, err := ha.SubscribeToTrigger(ctx, TriggerConfig(trigger))
+	if err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+
+	raw := <-ch
+	s, err := ParseTriggeredState(raw)
+	if err != nil {
+		t.Fatalf("failed to parse: %v", err)
+	}
+
+	if s.EntityId != "light.one" || s.ToState.State != "on" || s.FromState.State != "off" {
+		t.Fatalf("unexpected response: %v", s)
+	}
+
+	err = ha.UnsubscribeToEvents(ctx, id)
+	if err != nil {
+		t.Fatalf("failed to unsubscribe: %v", err)
 	}
 }

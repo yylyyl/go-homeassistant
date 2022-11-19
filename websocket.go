@@ -7,6 +7,7 @@ import (
 	"github.com/gorilla/websocket"
 	"log"
 	"sync"
+	"time"
 )
 
 type WebsocketConfig struct {
@@ -18,6 +19,19 @@ type WebsocketConfig struct {
 	WebSocketDialer *websocket.Dialer
 
 	debug bool
+}
+
+type eventType uint
+
+const (
+	eventTypeState eventType = iota
+	eventTypeTrigger
+)
+
+type eventReceiver struct {
+	eventType eventType
+	stateCh   chan<- ChangedState
+	triggerCh chan<- []byte
 }
 
 type WebsocketClient struct {
@@ -32,9 +46,8 @@ type WebsocketClient struct {
 	reqId    uint
 	reqMap   map[uint]*wsReqItem
 
-	subscriptionMutex   sync.Mutex
-	subscriptionEventCh chan ChangedState
-	subscriptionEventId uint
+	eventMutex sync.Mutex
+	eventMap   map[uint]*eventReceiver
 }
 
 type wsMsg struct {
@@ -53,6 +66,10 @@ func DialWebsocket(ctx context.Context, cfg *WebsocketConfig) (*WebsocketClient,
 		authorization: cfg.Authorization,
 		wsDialer:      cfg.WebSocketDialer,
 		debug:         cfg.debug,
+
+		wsMsgCh:  make(chan *wsMsg),
+		reqMap:   map[uint]*wsReqItem{},
+		eventMap: map[uint]*eventReceiver{},
 	}
 	if c.wsDialer == nil {
 		c.wsDialer = websocket.DefaultDialer
@@ -72,8 +89,6 @@ func (c *WebsocketClient) dial(ctx context.Context) error {
 	}
 
 	c.wsConn = conn
-	c.wsMsgCh = make(chan *wsMsg)
-	c.reqMap = make(map[uint]*wsReqItem)
 	go c.wsReceiver()
 
 	err = c.handshake(ctx)
@@ -161,7 +176,11 @@ func (c *WebsocketClient) wsReceiver() {
 	defer c.wsMutex.Unlock()
 
 	for id, req := range c.reqMap {
-		req.Ch <- &wsResp{Err: fmt.Errorf("ws closed")}
+		select {
+		case req.Ch <- &wsResp{Err: fmt.Errorf("ws closed")}:
+		default:
+			// you don't care
+		}
 		close(req.Ch)
 		delete(c.reqMap, id)
 	}
@@ -194,7 +213,7 @@ type wsMsgCommonReq struct {
 	// subscribe_events
 	EventType string `json:"event_type,omitempty"`
 	// subscribe_trigger
-	Trigger any `json:"trigger,omitempty"`
+	Trigger map[string]any `json:"trigger,omitempty"`
 	// unsubscribe_events
 	Subscription uint `json:"subscription,omitempty"`
 
@@ -222,7 +241,18 @@ type wsMsgCommonResp struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Event struct {
-		Data ChangedState
+		// possible value: state_changed or nil
+		EventType string `json:"event_type"`
+		// state event
+		Data ChangedState `json:"data"`
+		// trigger
+		Variables json.RawMessage `json:"variables"`
+		// state event
+		Origin string `json:"origin"`
+		// state event
+		TimeFired time.Time `json:"time_fired"`
+		// common field
+		Context any `json:"context"`
 	} `json:"event"`
 }
 
@@ -251,15 +281,25 @@ func (c *WebsocketClient) wsHandler() {
 		}
 
 		if resp.Type == "event" {
-			c.subscriptionMutex.Lock()
-			if c.subscriptionEventCh == nil || resp.ID != c.subscriptionEventId {
-				c.subscriptionMutex.Unlock()
+			c.eventMutex.Lock()
+
+			receiver := c.eventMap[resp.ID]
+			if receiver == nil {
 				log.Printf("WARN wild event: %v", resp)
+				c.eventMutex.Unlock()
 				continue
 			}
-			// this mutex protects the channel from being closed unexpectedly
-			c.subscriptionEventCh <- resp.Event.Data
-			c.subscriptionMutex.Unlock()
+
+			switch receiver.eventType {
+			case eventTypeState:
+				receiver.stateCh <- resp.Event.Data
+			case eventTypeTrigger:
+				receiver.triggerCh <- resp.Event.Variables
+			default:
+				log.Printf("WARN unimplemented event: %d", receiver.eventType)
+			}
+
+			c.eventMutex.Unlock()
 			continue
 		}
 

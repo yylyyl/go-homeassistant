@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -15,7 +16,7 @@ func (c *WebsocketClient) Ping(ctx context.Context) error {
 	}
 
 	if resp.Type != "pong" {
-		return fmt.Errorf("unecpected response of ping: %s", resp.Type)
+		return fmt.Errorf("unexpected response of ping: %s", resp.Type)
 	}
 
 	return nil
@@ -112,22 +113,14 @@ func (c *WebsocketClient) CallService(ctx context.Context,
 }
 
 type ChangedState struct {
-	EntityId  string    `json:"entity_id"`
-	NewState  Entity    `json:"new_state"`
-	OldState  Entity    `json:"old_state"`
-	EventType string    `json:"event_type"`
-	TimeFired time.Time `json:"time_fired"`
-	Origin    string    `json:"origin"`
-	Context   any       `json:"context"`
+	EntityId string `json:"entity_id"`
+	NewState Entity `json:"new_state"`
+	OldState Entity `json:"old_state"`
 }
 
-func (c *WebsocketClient) SubscribeEventsStateChanged(ctx context.Context) (<-chan ChangedState, error) {
-	c.subscriptionMutex.Lock()
-	defer c.subscriptionMutex.Unlock()
-
-	if c.subscriptionEventCh != nil {
-		return nil, errors.New("you have already subscribed to events")
-	}
+func (c *WebsocketClient) SubscribeToChangedStates(ctx context.Context) (<-chan ChangedState, uint, error) {
+	c.eventMutex.Lock()
+	defer c.eventMutex.Unlock()
 
 	ch := make(chan ChangedState)
 	resp, err := c.wsCommonCall(ctx, wsMsgCommonReq{
@@ -135,31 +128,64 @@ func (c *WebsocketClient) SubscribeEventsStateChanged(ctx context.Context) (<-ch
 		EventType: "state_changed",
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	_, err = wsGetResult(resp)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	c.subscriptionEventId = resp.ID
-	c.subscriptionEventCh = ch
+	c.eventMap[resp.ID] = &eventReceiver{
+		eventType: eventTypeState,
+		stateCh:   ch,
+	}
 
-	return ch, nil
+	return ch, resp.ID, nil
 }
 
-func (c *WebsocketClient) UnsubscribeEventsStateChanged(ctx context.Context) error {
-	c.subscriptionMutex.Lock()
-	defer c.subscriptionMutex.Unlock()
+// SubscribeToTrigger subscribes to triggers, check documents
+// here https://www.home-assistant.io/docs/automation/trigger/
+func (c *WebsocketClient) SubscribeToTrigger(ctx context.Context, trigger TriggerConfig) (<-chan []byte, uint, error) {
+	c.eventMutex.Lock()
+	defer c.eventMutex.Unlock()
 
-	if c.subscriptionEventCh == nil {
-		return errors.New("you haven't subscribed to events")
+	ch := make(chan []byte)
+
+	resp, err := c.wsCommonCall(ctx, wsMsgCommonReq{
+		Type:    "subscribe_trigger",
+		Trigger: trigger,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	_, err = wsGetResult(resp)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	c.eventMap[resp.ID] = &eventReceiver{
+		eventType: eventTypeTrigger,
+		triggerCh: ch,
+	}
+
+	return ch, resp.ID, nil
+}
+
+// UnsubscribeToEvents can be used to unsubscribe to states or triggers
+func (c *WebsocketClient) UnsubscribeToEvents(ctx context.Context, id uint) error {
+	c.eventMutex.Lock()
+	defer c.eventMutex.Unlock()
+
+	receiver := c.eventMap[id]
+	if receiver == nil {
+		return errors.New("invalid subscription id")
 	}
 
 	resp, err := c.wsCommonCall(ctx, wsMsgCommonReq{
 		Type:         "unsubscribe_events",
-		Subscription: c.subscriptionEventId,
+		Subscription: id,
 	})
 	if err != nil {
 		return err
@@ -170,8 +196,15 @@ func (c *WebsocketClient) UnsubscribeEventsStateChanged(ctx context.Context) err
 		return err
 	}
 
-	close(c.subscriptionEventCh)
-	c.subscriptionEventCh = nil
+	switch receiver.eventType {
+	case eventTypeState:
+		close(receiver.stateCh)
+	case eventTypeTrigger:
+		close(receiver.triggerCh)
+	default:
+		log.Printf("WARN unimplemented event: %d", receiver.eventType)
+	}
+	delete(c.eventMap, id)
 
 	return nil
 }
