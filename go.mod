@@ -1,4 +1,4 @@
-module homeassistant
+module github.com/yylyyl/go-homeassistant
 
 go 1.18
 
