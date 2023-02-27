@@ -48,6 +48,9 @@ type WebsocketClient struct {
 
 	eventMutex sync.Mutex
 	eventMap   map[uint]*eventReceiver
+
+	closed  bool
+	closeCh []chan struct{}
 }
 
 type wsMsg struct {
@@ -184,6 +187,45 @@ func (c *WebsocketClient) wsReceiver() {
 		close(req.Ch)
 		delete(c.reqMap, id)
 	}
+
+	for id, receiver := range c.eventMap {
+		switch receiver.eventType {
+		case eventTypeState:
+			close(receiver.stateCh)
+		case eventTypeTrigger:
+			close(receiver.triggerCh)
+		default:
+			log.Printf("WARN unimplemented event: %d", receiver.eventType)
+		}
+		delete(c.eventMap, id)
+	}
+
+	c.closed = true
+	for _, closeCh := range c.closeCh {
+		closeCh <- struct{}{}
+	}
+}
+
+// Closed returns a channel for the close of websocket connection
+func (c *WebsocketClient) Closed() <-chan struct{} {
+	c.wsMutex.Lock()
+	defer c.wsMutex.Unlock()
+
+	ch := make(chan struct{})
+	if c.closed {
+		go func() {
+			ch <- struct{}{}
+		}()
+		return ch
+	}
+
+	c.closeCh = append(c.closeCh, ch)
+	return ch
+}
+
+// Close closes the websocket connection
+func (c *WebsocketClient) Close() error {
+	return c.wsConn.Close()
 }
 
 func (c *WebsocketClient) getHandshakeMsgWithContext(ctx context.Context) ([]byte, error) {
@@ -213,7 +255,7 @@ type wsMsgCommonReq struct {
 	// subscribe_events
 	EventType string `json:"event_type,omitempty"`
 	// subscribe_trigger
-	Trigger map[string]any `json:"trigger,omitempty"`
+	Trigger any `json:"trigger,omitempty"`
 	// unsubscribe_events
 	Subscription uint `json:"subscription,omitempty"`
 

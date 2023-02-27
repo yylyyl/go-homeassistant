@@ -22,7 +22,7 @@ func (c *WebsocketClient) Ping(ctx context.Context) error {
 	return nil
 }
 
-type EntityList []Entity
+type EntityList []*Entity
 type Entity struct {
 	EntityId    string         `json:"entity_id"`
 	State       string         `json:"state"`
@@ -154,7 +154,7 @@ func (c *WebsocketClient) SubscribeToTrigger(ctx context.Context, trigger Trigge
 
 	resp, err := c.wsCommonCall(ctx, wsMsgCommonReq{
 		Type:    "subscribe_trigger",
-		Trigger: trigger,
+		Trigger: trigger.GetTriggerConfig(),
 	})
 	if err != nil {
 		return nil, 0, err

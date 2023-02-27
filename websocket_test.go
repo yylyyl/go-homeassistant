@@ -214,15 +214,15 @@ func TestWebsocketClient_GetStates(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	ret, err := ha.GetStates(ctx)
+	ret, err := ha.GetStatesMap(ctx)
 	if err != nil {
 		t.Fatalf("failed to get states: %v", err)
 	}
 
-	if ret[0].EntityId != "light.one" || ret[0].State != "on" {
+	if ret["light.one"].State != "on" {
 		t.Fatalf("unexpected response: %v", ret)
 	}
-	if ret[1].EntityId != "switch.one" || ret[1].State != "off" {
+	if ret["switch.one"].State != "off" {
 		t.Fatalf("unexpected response: %v", ret)
 	}
 }
@@ -398,16 +398,12 @@ func TestWebsocketClient_SubscribeToTrigger(t *testing.T) {
 	trigger.EntityId("light.one")
 	trigger.To("on")
 
-	ch, id, err := ha.SubscribeToTrigger(ctx, TriggerConfig(trigger))
+	ch, id, err := ha.SubscribeToStateTrigger(ctx, trigger)
 	if err != nil {
 		t.Fatalf("failed to subscribe: %v", err)
 	}
 
-	raw := <-ch
-	s, err := ParseTriggeredState(raw)
-	if err != nil {
-		t.Fatalf("failed to parse: %v", err)
-	}
+	s := <-ch
 
 	if s.EntityId != "light.one" || s.ToState.State != "on" || s.FromState.State != "off" {
 		t.Fatalf("unexpected response: %v", s)

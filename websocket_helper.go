@@ -1,45 +1,10 @@
 package homeassistant
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 )
-
-type TriggerConfig map[string]any
-type StateTriggerConfig TriggerConfig
-
-func NewStateTriggerConfig() StateTriggerConfig {
-	return map[string]any{
-		"platform": "state",
-	}
-}
-
-func (c StateTriggerConfig) EntityId(v any) {
-	c["entity_id"] = v
-}
-
-func (c StateTriggerConfig) To(v any) {
-	c["to"] = v
-}
-
-func (c StateTriggerConfig) From(v any) {
-	c["from"] = v
-}
-
-func (c StateTriggerConfig) NotFrom(v any) {
-	c["not_from"] = v
-}
-
-func (c StateTriggerConfig) NotTo(v any) {
-	c["not_to"] = v
-}
-
-func (c StateTriggerConfig) Attribute(v any) {
-	c["attribute"] = v
-}
-
-func (c StateTriggerConfig) For(v any) {
-	c["for"] = v
-}
 
 type TriggeredState struct {
 	Platform    string `json:"platform"`
@@ -62,4 +27,40 @@ func ParseTriggeredState(input []byte) (*TriggeredState, error) {
 		return nil, err
 	}
 	return ret.Trigger, nil
+}
+
+func (c *WebsocketClient) SubscribeToStateTrigger(ctx context.Context, trigger StateTriggerConfig) (<-chan *TriggeredState, uint, error) {
+	ch, id, err := c.SubscribeToTrigger(ctx, trigger)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	newCh := make(chan *TriggeredState)
+	go func() {
+		defer close(newCh)
+		for raw := range ch {
+			st, err := ParseTriggeredState(raw)
+			if err != nil {
+				log.Printf("WARN failed to parse triggered state: %v %s", err, raw)
+				continue
+			}
+			newCh <- st
+		}
+	}()
+
+	return newCh, id, nil
+}
+
+func (c *WebsocketClient) GetStatesMap(ctx context.Context) (map[string]*Entity, error) {
+	list, err := c.GetStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := make(map[string]*Entity)
+	for _, e := range list {
+		ret[e.EntityId] = e
+	}
+
+	return ret, nil
 }
